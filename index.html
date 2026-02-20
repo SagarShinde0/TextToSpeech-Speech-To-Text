@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice Recognizer + TTS</title>
+
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: #f4f6f9;
+    text-align: center;
+    padding: 40px;
+}
+
+.container {
+    background: white;
+    padding: 30px;
+    border-radius: 10px;
+    box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+    max-width: 500px;
+    margin: auto;
+}
+
+h2 {
+    margin-bottom: 20px;
+}
+
+button {
+    padding: 10px 20px;
+    margin: 8px;
+    font-size: 15px;
+    border: none;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: 0.3s;
+}
+
+#startBtn { background: #4CAF50; color: white; }
+#stopBtn { background: #f44336; color: white; }
+#speakBtn { background: #2196F3; color: white; }
+
+button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+#status {
+    margin-top: 15px;
+    color: gray;
+    font-weight: bold;
+}
+
+#output {
+    margin-top: 20px;
+    font-size: 18px;
+    min-height: 40px;
+}
+</style>
+</head>
+
+<body>
+
+<div class="container">
+    <h2>🎤 Voice Recognizer + TTS</h2>
+
+    <button id="startBtn">Start Listening</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <button id="speakBtn">Speak</button>
+
+    <p id="status">Status: Idle</p>
+    <p id="output"></p>
+</div>
+
+<script>
+"use strict";
+
+let recognition = null;
+let finalText = "";
+let isListening = false;
+
+/* ==============================
+   CHECK BROWSER SUPPORT
+============================== */
+
+if (!("SpeechRecognition" in window) && 
+    !("webkitSpeechRecognition" in window)) {
+
+    alert("Speech Recognition is not supported. Please use Google Chrome.");
+} else {
+
+    const SpeechRecognition = 
+        window.SpeechRecognition || 
+        window.webkitSpeechRecognition;
+
+    recognition = new SpeechRecognition();
+
+    recognition.lang = "en-US";
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    /* ==============================
+       EVENTS
+    ============================== */
+
+    recognition.onstart = function () {
+        isListening = true;
+        updateStatus("Listening...");
+        toggleButtons(true);
+    };
+
+    recognition.onresult = function (event) {
+        finalText = event.results[0][0].transcript;
+        document.getElementById("output").innerText = finalText;
+        updateStatus("Speech Recognized");
+    };
+
+    recognition.onerror = function (event) {
+        updateStatus("Error: " + event.error);
+        resetState();
+    };
+
+    recognition.onend = function () {
+        resetState();
+    };
+}
+
+/* ==============================
+   BUTTON EVENTS
+============================== */
+
+document.getElementById("startBtn").addEventListener("click", function () {
+    if (!recognition) return;
+
+    if (!isListening) {
+        try {
+            recognition.start();
+        } catch (error) {
+            updateStatus("Microphone already in use.");
+        }
+    }
+});
+
+document.getElementById("stopBtn").addEventListener("click", function () {
+    if (recognition && isListening) {
+        recognition.stop();
+    }
+});
+
+document.getElementById("speakBtn").addEventListener("click", function () {
+
+    if (!("speechSynthesis" in window)) {
+        alert("Text-to-Speech not supported in this browser.");
+        return;
+    }
+
+    if (finalText.trim() === "") {
+        alert("No text to speak.");
+        return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    const speech = new SpeechSynthesisUtterance(finalText);
+    speech.lang = "en-US";
+    speech.rate = 1;
+    speech.pitch = 1;
+
+    window.speechSynthesis.speak(speech);
+});
+
+/* ==============================
+   HELPER FUNCTIONS
+============================== */
+
+function updateStatus(message) {
+    document.getElementById("status").innerText = "Status: " + message;
+}
+
+function toggleButtons(listening) {
+    document.getElementById("startBtn").disabled = listening;
+    document.getElementById("stopBtn").disabled = !listening;
+}
+
+function resetState() {
+    isListening = false;
+    toggleButtons(false);
+}
+
+</script>
+
+</body>
+</html>
