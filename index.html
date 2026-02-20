@@ -3,46 +3,42 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Voice Recognizer + TTS</title>
+<title>Voice Assistant Pro</title>
 
 <style>
 body {
-    font-family: Arial, sans-serif;
+    font-family: Arial;
     background: #f4f6f9;
     text-align: center;
     padding: 40px;
 }
-
 .container {
     background: white;
     padding: 30px;
     border-radius: 10px;
     box-shadow: 0 5px 20px rgba(0,0,0,0.1);
-    max-width: 500px;
+    max-width: 600px;
     margin: auto;
 }
-
-h2 {
-    margin-bottom: 20px;
-}
-
 button {
     padding: 10px 20px;
     margin: 8px;
-    font-size: 15px;
     border: none;
     border-radius: 5px;
     cursor: pointer;
-    transition: 0.3s;
+    font-size: 15px;
 }
-
 #startBtn { background: #4CAF50; color: white; }
 #stopBtn { background: #f44336; color: white; }
 #speakBtn { background: #2196F3; color: white; }
+#downloadBtn { background: #9C27B0; color: white; }
 
-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
+textarea {
+    width: 100%;
+    height: 80px;
+    margin-top: 15px;
+    padding: 10px;
+    font-size: 15px;
 }
 
 #status {
@@ -50,132 +46,154 @@ button:disabled {
     color: gray;
     font-weight: bold;
 }
-
-#output {
-    margin-top: 20px;
-    font-size: 18px;
-    min-height: 40px;
-}
 </style>
 </head>
 
 <body>
 
 <div class="container">
-    <h2>🎤 Voice Recognizer + TTS</h2>
+<h2>🎤 Voice Recognizer + TTS Pro</h2>
 
-    <button id="startBtn">Start Listening</button>
-    <button id="stopBtn" disabled>Stop</button>
-    <button id="speakBtn">Speak</button>
+<button id="startBtn">Start Listening</button>
+<button id="stopBtn" disabled>Stop</button>
 
-    <p id="status">Status: Idle</p>
-    <p id="output"></p>
+<p id="status">Status: Idle</p>
+
+<textarea id="textInput" placeholder="Speech will appear here or type manually..."></textarea>
+
+<button id="speakBtn">Convert to Speech</button>
+<button id="downloadBtn">Download Audio</button>
+
 </div>
 
 <script>
 "use strict";
 
-let recognition = null;
-let finalText = "";
+let recognition;
 let isListening = false;
+let audioChunks = [];
+let mediaRecorder;
+let recordedBlob;
 
-/* ==============================
-   CHECK BROWSER SUPPORT
-============================== */
+/* ===============================
+   SPEECH RECOGNITION SETUP
+================================ */
 
-if (!("SpeechRecognition" in window) && 
-    !("webkitSpeechRecognition" in window)) {
+if ("SpeechRecognition" in window || "webkitSpeechRecognition" in window) {
 
-    alert("Speech Recognition is not supported. Please use Google Chrome.");
-} else {
-
-    const SpeechRecognition = 
-        window.SpeechRecognition || 
-        window.webkitSpeechRecognition;
+    const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
 
     recognition = new SpeechRecognition();
-
     recognition.lang = "en-US";
-    recognition.continuous = false;
     recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
 
-    /* ==============================
-       EVENTS
-    ============================== */
-
-    recognition.onstart = function () {
+    recognition.onstart = () => {
         isListening = true;
         updateStatus("Listening...");
         toggleButtons(true);
     };
 
-    recognition.onresult = function (event) {
-        finalText = event.results[0][0].transcript;
-        document.getElementById("output").innerText = finalText;
+    recognition.onresult = (event) => {
+        const text = event.results[0][0].transcript;
+        document.getElementById("textInput").value = text;
         updateStatus("Speech Recognized");
     };
 
-    recognition.onerror = function (event) {
+    recognition.onerror = (event) => {
         updateStatus("Error: " + event.error);
         resetState();
     };
 
-    recognition.onend = function () {
+    recognition.onend = () => {
         resetState();
     };
+
+} else {
+    alert("Speech Recognition not supported. Use Google Chrome.");
 }
 
-/* ==============================
+/* ===============================
    BUTTON EVENTS
-============================== */
+================================ */
 
-document.getElementById("startBtn").addEventListener("click", function () {
-    if (!recognition) return;
-
-    if (!isListening) {
-        try {
-            recognition.start();
-        } catch (error) {
-            updateStatus("Microphone already in use.");
-        }
+document.getElementById("startBtn").onclick = () => {
+    if (!isListening && recognition) {
+        try { recognition.start(); }
+        catch { updateStatus("Microphone busy."); }
     }
-});
+};
 
-document.getElementById("stopBtn").addEventListener("click", function () {
-    if (recognition && isListening) {
+document.getElementById("stopBtn").onclick = () => {
+    if (isListening && recognition) {
         recognition.stop();
     }
-});
+};
 
-document.getElementById("speakBtn").addEventListener("click", function () {
+document.getElementById("speakBtn").onclick = () => {
+    const text = document.getElementById("textInput").value.trim();
 
-    if (!("speechSynthesis" in window)) {
-        alert("Text-to-Speech not supported in this browser.");
+    if (!text) {
+        alert("Please enter text first.");
         return;
     }
 
-    if (finalText.trim() === "") {
-        alert("No text to speak.");
+    if (!("speechSynthesis" in window)) {
+        alert("TTS not supported.");
         return;
     }
 
     window.speechSynthesis.cancel();
-
-    const speech = new SpeechSynthesisUtterance(finalText);
-    speech.lang = "en-US";
+    const speech = new SpeechSynthesisUtterance(text);
     speech.rate = 1;
     speech.pitch = 1;
-
+    speech.lang = "en-US";
     window.speechSynthesis.speak(speech);
-});
+};
 
-/* ==============================
-   HELPER FUNCTIONS
-============================== */
+/* ===============================
+   RECORD AND DOWNLOAD AUDIO
+================================ */
 
-function updateStatus(message) {
-    document.getElementById("status").innerText = "Status: " + message;
+document.getElementById("downloadBtn").onclick = async () => {
+    const text = document.getElementById("textInput").value.trim();
+
+    if (!text) {
+        alert("Enter text first.");
+        return;
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream);
+    audioChunks = [];
+
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+
+    mediaRecorder.onstop = () => {
+        recordedBlob = new Blob(audioChunks, { type: "audio/wav" });
+        const url = URL.createObjectURL(recordedBlob);
+
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "speech.wav";
+        a.click();
+
+        stream.getTracks().forEach(track => track.stop());
+    };
+
+    mediaRecorder.start();
+
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.onend = () => mediaRecorder.stop();
+    window.speechSynthesis.speak(utter);
+};
+
+/* ===============================
+   HELPERS
+================================ */
+
+function updateStatus(msg) {
+    document.getElementById("status").innerText = "Status: " + msg;
 }
 
 function toggleButtons(listening) {
@@ -186,6 +204,7 @@ function toggleButtons(listening) {
 function resetState() {
     isListening = false;
     toggleButtons(false);
+    updateStatus("Idle");
 }
 
 </script>
