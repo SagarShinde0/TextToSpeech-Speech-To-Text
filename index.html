@@ -20,7 +20,7 @@ body {
 }
 
 .container {
-  max-width: 850px;
+  max-width: 900px;
   margin: auto;
   background: white;
   padding: 30px;
@@ -55,7 +55,7 @@ button:disabled {
   cursor: not-allowed;
 }
 
-textarea, select {
+textarea, select, input[type=range] {
   width: 100%;
   margin-top: 10px;
   padding: 12px;
@@ -71,6 +71,14 @@ textarea { min-height: 90px; }
   font-weight: 600;
   color: #475569;
 }
+
+.range-box {
+  margin-top: 10px;
+  text-align: left;
+}
+.range-box span {
+  font-weight: 600;
+}
 </style>
 </head>
 
@@ -78,7 +86,7 @@ textarea { min-height: 90px; }
 
 <div class="container">
 <h2>🎤 Voice Assistant Pro</h2>
-<small>Professional browser-based Speech Recognition & Text-to-Speech</small>
+<small>Professional Speech Recognition & Text-to-Speech System</small>
 
 <!-- ===================== SPEECH TO TEXT ===================== -->
 <div class="section">
@@ -100,6 +108,13 @@ textarea { min-height: 90px; }
 
 <select id="voiceSelect"></select>
 
+<div class="range-box">
+  <label>
+    Speed: <span id="speedValue">1.0x</span>
+  </label>
+  <input type="range" id="speedControl" min="0.5" max="2" step="0.1" value="1">
+</div>
+
 <button id="ttsPlay" class="primary">Speak</button>
 <button id="ttsStop" class="danger">Stop</button>
 </div>
@@ -107,7 +122,7 @@ textarea { min-height: 90px; }
 <!-- ===================== MIC RECORDING ===================== -->
 <div class="section">
 <h3>Microphone Recording (Optional)</h3>
-<small>Records microphone input only (not TTS audio)</small><br>
+<small>Records microphone input only (not system TTS)</small><br>
 
 <button id="recStart" class="success">Start Recording</button>
 <button id="recStop" class="danger" disabled>Stop & Download</button>
@@ -140,7 +155,7 @@ const STT = (() => {
 
   recognition.onstart = () => {
     active = true;
-    update("Listening...");
+    sttStatus.innerText = "Listening...";
     toggle(true);
   };
 
@@ -155,7 +170,7 @@ const STT = (() => {
   };
 
   recognition.onerror = (e) => {
-    update("Error: " + e.error);
+    sttStatus.innerText = "Error: " + e.error;
     stop();
   };
 
@@ -171,16 +186,12 @@ const STT = (() => {
     active = false;
     recognition.stop();
     toggle(false);
-    update("Stopped");
+    sttStatus.innerText = "Stopped";
   }
 
   function toggle(listening) {
     sttStart.disabled = listening;
     sttStop.disabled = !listening;
-  }
-
-  function update(msg) {
-    sttStatus.innerText = msg;
   }
 
   return { start, stop };
@@ -190,10 +201,12 @@ sttStart.onclick = STT.start;
 sttStop.onclick = STT.stop;
 
 /* ==========================================================
-   TEXT TO SPEECH MODULE (VOICE SELECTION)
+   TEXT TO SPEECH MODULE (VOICE + SPEED CONTROL)
 ========================================================== */
 
 let voices = [];
+const speedSlider = document.getElementById("speedControl");
+const speedValue = document.getElementById("speedValue");
 
 function loadVoices() {
   voices = speechSynthesis.getVoices();
@@ -201,18 +214,16 @@ function loadVoices() {
 
   voices.forEach((voice, i) => {
     const opt = document.createElement("option");
-    let label = voice.name;
+    let label = voice.name.toLowerCase();
 
-    const n = voice.name.toLowerCase();
-    if (n.includes("female") || n.includes("zira") || n.includes("woman"))
-      label += " (Female)";
-    else if (n.includes("male") || n.includes("david") || n.includes("man"))
-      label += " (Male)";
+    if (label.includes("female") || label.includes("zira") || label.includes("woman"))
+      opt.textContent = voice.name + " (Female)";
+    else if (label.includes("male") || label.includes("david") || label.includes("man"))
+      opt.textContent = voice.name + " (Male)";
     else
-      label += " (Default)";
+      opt.textContent = voice.name + " (Default)";
 
     opt.value = i;
-    opt.textContent = label;
     voiceSelect.appendChild(opt);
   });
 }
@@ -220,24 +231,28 @@ function loadVoices() {
 speechSynthesis.onvoiceschanged = loadVoices;
 loadVoices();
 
+speedSlider.oninput = () => {
+  speedValue.innerText = speedSlider.value + "x";
+};
+
 ttsPlay.onclick = () => {
   const text = ttsText.value.trim();
   if (!text) return alert("Enter text first.");
 
   speechSynthesis.cancel();
 
-  const u = new SpeechSynthesisUtterance(text);
-  const v = voices[voiceSelect.value];
+  const utter = new SpeechSynthesisUtterance(text);
+  const voice = voices[voiceSelect.value];
 
-  if (v) {
-    u.voice = v;
-    u.lang = v.lang;
+  if (voice) {
+    utter.voice = voice;
+    utter.lang = voice.lang;
   }
 
-  u.rate = 1;
-  u.pitch = 1;
+  utter.rate = parseFloat(speedSlider.value); // 🔥 SPEED CONTROL
+  utter.pitch = 1;
 
-  speechSynthesis.speak(u);
+  speechSynthesis.speak(utter);
 };
 
 ttsStop.onclick = () => speechSynthesis.cancel();
