@@ -530,6 +530,54 @@ input[type="range"]::-moz-range-thumb {
   padding-top: var(--space-lg);
 }
 
+/* TTS Progress Row */
+.tts-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-md);
+  background: var(--bg-input);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-lg);
+}
+
+.tts-progress-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+}
+
+.progress-label {
+  color: var(--text-muted);
+}
+
+.progress-current {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.progress-percent {
+  color: var(--accent-success);
+  font-weight: 600;
+  min-width: 40px;
+}
+
+/* Warning */
+.char-count.warning {
+  color: var(--accent-warning);
+  font-weight: 500;
+}
+
+/* TTS Buttons Container */
+.tts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: center;
+}
+
 /* Recorder */
 .rec-timer {
   text-align: center;
