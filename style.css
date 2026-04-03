@@ -263,6 +263,8 @@ body::before {
   cursor: pointer;
   transition: all var(--transition-fast);
   white-space: nowrap;
+  position: relative;
+  z-index: 10;
 }
 
 .btn svg {
@@ -273,6 +275,11 @@ body::before {
   opacity: 0.5;
   cursor: not-allowed;
   pointer-events: none;
+}
+
+.btn:not(:disabled) {
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .btn-primary {
