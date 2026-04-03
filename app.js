@@ -334,8 +334,8 @@
   };
 
   /* ========================================
-     Text to Speech Module
-     ======================================== */
+      Text to Speech Module
+      ======================================== */
   const TextToSpeech = {
     init() {
       this.loadVoices();
@@ -344,7 +344,11 @@
     },
 
     loadVoices() {
-      const voices = speechSynthesis.getVoices();
+      let voices = speechSynthesis.getVoices();
+      
+      if (voices.length === 0) {
+        voices = window.speechSynthesis?.getVoices() || [];
+      }
       
       if (voices.length > 0) {
         state.tts.voices = voices;
@@ -356,7 +360,7 @@
       
       if (state.tts.retryCount < state.tts.maxRetries) {
         state.tts.retryCount++;
-        setTimeout(() => this.loadVoices(), 200);
+        setTimeout(() => this.loadVoices(), 300);
       }
     },
 
@@ -470,10 +474,14 @@
         return;
       }
 
+      if (speechSynthesis.speaking) {
+        speechSynthesis.cancel();
+      }
+
       if (!state.tts.isLoaded || state.tts.voices.length === 0) {
-        showToast(' voices are still loading. Please wait a moment.', 'info');
+        showToast('Loading voices...', 'info');
         this.loadVoices();
-        setTimeout(() => this.speak(), 500);
+        setTimeout(() => this.speak(), 1000);
         return;
       }
 
@@ -497,6 +505,7 @@
         state.tts.isSpeaking = true;
         state.tts.currentUtterance = utter;
         this.updateUI(true);
+        showToast('Speaking...', 'info', 1500);
       };
 
       utter.onend = () => {
@@ -746,9 +755,9 @@
   };
 
   /* ========================================
-     Initialization
-     ======================================== */
-  function init() {
+      Initialization
+      ======================================== */
+  async function init() {
     SpeechToText.init();
     TextToSpeech.init();
     Recorder.init();
@@ -762,6 +771,23 @@
       }
       document.removeEventListener('touchstart', onTouchStart);
     }, { once: true });
+    
+    if (/Mobi|Android/i.test(navigator.userAgent)) {
+      document.addEventListener('click', function onMobileClick() {
+        if (speechSynthesis.state === 'suspended') {
+          speechSynthesis.resume();
+        }
+        const dummy = new SpeechSynthesisUtterance('');
+        speechSynthesis.speak(dummy);
+        document.removeEventListener('click', onMobileClick);
+      }, { once: true });
+      
+      if (navigator.wakeLock && 'wakeLock' in navigator) {
+        try {
+          await navigator.wakeLock.request('screen');
+        } catch (e) {}
+      }
+    }
     
     console.log('Voice Assistant Pro initialized');
   }
