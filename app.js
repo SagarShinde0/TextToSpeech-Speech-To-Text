@@ -1,6 +1,6 @@
 /* ========================================
    Voice Assistant Pro - Production JavaScript
-   Enhanced TTS with State Machine & Provider Architecture
+   Enhanced TTS with Verified Playback
    ======================================== */
 
 (function() {
@@ -52,6 +52,7 @@
     IDLE: 'idle',
     PREPARING: 'preparing',
     READY: 'ready',
+    STARTING: 'starting',
     SPEAKING: 'speaking',
     PAUSED: 'paused',
     STOPPING: 'stopping',
@@ -62,8 +63,9 @@
     isValidTransition(fromState, toState) {
       const validTransitions = {
         [this.IDLE]: [this.PREPARING, this.READY],
-        [this.PREPARING]: [this.READY, this.SPEAKING, this.ERROR, this.IDLE],
-        [this.READY]: [this.SPEAKING, this.IDLE],
+        [this.PREPARING]: [this.READY, this.STARTING, this.SPEAKING, this.ERROR, this.IDLE],
+        [this.READY]: [this.STARTING, this.SPEAKING, this.IDLE],
+        [this.STARTING]: [this.SPEAKING, this.ERROR, this.IDLE],
         [this.SPEAKING]: [this.PAUSED, this.STOPPING, this.FINISHED, this.ERROR],
         [this.PAUSED]: [this.SPEAKING, this.STOPPING, this.IDLE],
         [this.STOPPING]: [this.STOPPED, this.IDLE],
@@ -353,7 +355,8 @@
 
     validateChunks(chunks, originalText) {
       const valid = (chunks || []).filter(c => 
-        c && typeof c === 'string' && c.trim().length > 0
+        c && typeof c === 'string' && c.trim().length > 0 && 
+        c.trim().replace(/^[.,!?;:()[\]{}]+|[.,!?;:()[\]{}]+$/g, '').length > 0
       );
       if (valid.length > 0) return valid;
 
@@ -475,6 +478,7 @@
 
   /* ========================================
      Speech Controller - Central Playback Control
+     with VERIFIED playback lifecycle
      ======================================== */
   const SpeechController = {
     queue: [],
@@ -484,6 +488,11 @@
     isCancelled: false,
     currentUtterance: null,
     sessionId: null,
+    
+    chunkStartTime: null,
+    didCurrentChunkStart: false,
+    startTimeoutId: null,
+    START_TIMEOUT_MS: 2000,
     
     init() {
       checkBrowserSupport();
@@ -600,11 +609,11 @@
       const queueHasItems = this.queue.length > 0;
       
       const isIdle = TtsState.playbackState === 'idle' || TtsState.playbackState === 'finished';
-      const isSpeaking = TtsState.playbackState === 'speaking';
+      const isSpeaking = TtsState.playbackState === 'speaking' || TtsState.playbackState === 'starting';
       const isPausedState = TtsState.playbackState === 'paused';
       
       const canPlay = hasText && browserSupported && voicesLoaded && isIdle;
-      const canPause = isSpeaking;
+      const canPause = isSpeaking && !isPausedState;
       const canResume = isPausedState;
       const canStop = isSpeaking || isPausedState;
       const hasPrevChunk = queueHasItems && this.currentIndex > 0;
@@ -646,18 +655,29 @@
         elements.ttsStatusBadge.innerHTML = 
           '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
       } else if (total > 0) {
-        const displayCurrent = this.isPlaying || this.isPaused ? (current + 1) : 0;
-        const percent = Math.round((displayCurrent / total) * 100);
+        const displayCurrent = (this.isPlaying || this.isPaused) ? (current + 1) : 0;
+        const percent = total > 0 ? Math.round((displayCurrent / total) * 100) : 0;
         elements.ttsProgress.textContent = displayCurrent + ' / ' + total;
         elements.ttsProgressPercent.textContent = percent + '%';
         
-        if (this.isPlaying) {
+        const state = TtsState.playbackState;
+        if (state === 'starting') {
+          elements.ttsStatusBadge.innerHTML = 
+            '<span class="status-dot speaking"></span><span class="status-text">Starting...</span>';
+        } else if (state === 'speaking') {
           elements.ttsStatusBadge.innerHTML = 
             '<span class="status-dot speaking"></span>' +
             '<span class="status-text">Playing ' + displayCurrent + '/' + total + '</span>';
-        } else if (this.isPaused) {
+        } else if (state === 'paused') {
           elements.ttsStatusBadge.innerHTML = 
             '<span class="status-dot ready"></span><span class="status-text">Paused</span>';
+        } else if (state === 'finished') {
+          elements.ttsStatusBadge.innerHTML = 
+            '<span class="status-dot ready"></span><span class="status-text">Finished</span>';
+        } else if (state === 'error') {
+          elements.ttsStatusBadge.innerHTML = 
+            '<span class="status-dot" style="background: var(--accent-danger)"></span>' +
+            '<span class="status-text">Error</span>';
         } else {
           elements.ttsStatusBadge.innerHTML = 
             '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
@@ -739,7 +759,7 @@
       TtsState.chunks = chunks;
       TtsState.totalChunks = chunks.length;
       TtsState.currentChunkIndex = 0;
-      PlaybackState.transition('speaking');
+      PlaybackState.transition('starting');
       
       this.updateControls();
       this.updateProgressUI();
@@ -761,6 +781,7 @@
       if (this.isCancelled || !SessionManager.isCurrentSession(currentSession)) {
         console.log('[TTS] Session cancelled or stale, stopping');
         PlaybackState.transition('idle');
+        this.clearStartTimeout();
         return;
       }
       
@@ -770,6 +791,18 @@
       }
 
       const chunk = this.queue[this.currentIndex];
+      
+      if (!this.validateChunk(chunk)) {
+        console.warn('[TTS] Invalid chunk at index', this.currentIndex, chunk);
+        this.currentIndex++;
+        setTimeout(() => {
+          if (SessionManager.isCurrentSession(currentSession) && !this.isCancelled) {
+            this.speakCurrentChunk();
+          }
+        }, 50);
+        return;
+      }
+      
       TtsState.currentChunkIndex = this.currentIndex;
       
       if (speechSynthesis.speaking) {
@@ -789,27 +822,49 @@
       utter.volume = TtsState.volume;
 
       this.currentUtterance = utter;
+      
+      this.didCurrentChunkStart = false;
+      this.chunkStartTime = Date.now();
+      
+      this.clearStartTimeout();
+      this.startTimeoutId = setTimeout(() => {
+        this.handleStartTimeout(currentSession);
+      }, this.START_TIMEOUT_MS);
 
       const sessionCheck = this.sessionId;
 
       utter.onstart = () => {
+        this.clearStartTimeout();
+        
         if (!SessionManager.isCurrentSession(sessionCheck)) {
           console.log('[TTS] onstart - stale session, ignoring');
           return;
         }
         if (this.isCancelled) return;
         
+        this.didCurrentChunkStart = true;
         this.isPlaying = true;
         PlaybackState.transition('speaking');
+        console.log('[TTS] Speech started for chunk', this.currentIndex + 1);
         this.updateProgressUI();
       };
 
       utter.onend = () => {
+        this.clearStartTimeout();
+        
         if (!SessionManager.isCurrentSession(sessionCheck)) {
           console.log('[TTS] onend - stale session, ignoring');
           return;
         }
         if (this.isCancelled) return;
+        
+        console.log('[TTS] onend fired, didStart:', this.didCurrentChunkStart);
+        
+        if (!this.didCurrentChunkStart) {
+          console.warn('[TTS] onend fired but speech never started - treating as failure');
+          this.handleChunkFailed(currentSession, 'Speech failed to start');
+          return;
+        }
         
         if (this.currentIndex < this.queue.length - 1) {
           this.currentIndex++;
@@ -817,22 +872,34 @@
             if (SessionManager.isCurrentSession(sessionCheck) && !this.isCancelled) {
               this.speakCurrentChunk();
             }
-          }, 150);
+          }, 200);
         } else {
           this.onPlaybackComplete();
         }
       };
 
       utter.onerror = (event) => {
+        this.clearStartTimeout();
+        
         if (!SessionManager.isCurrentSession(sessionCheck)) {
           console.log('[TTS] onerror - stale session, ignoring');
           return;
         }
         if (this.isCancelled) return;
-        if (event.error === 'canceled' || event.error === 'interrupted') return;
         
-        console.error('TTS Error:', event.error);
+        if (event.error === 'canceled' || event.error === 'interrupted') {
+          console.log('[TTS] onerror: canceled/interrupted, ignoring');
+          return;
+        }
+        
+        console.error('[TTS] onerror:', event.error);
         TtsState.lastError = event.error;
+        
+        if (!this.didCurrentChunkStart) {
+          console.warn('[TTS] onerror before onstart - speech failed');
+          this.handleChunkFailed(currentSession, event.error);
+          return;
+        }
         
         if (this.currentIndex < this.queue.length - 1) {
           this.currentIndex++;
@@ -849,14 +916,71 @@
       try {
         speechSynthesis.speak(utter);
       } catch (e) {
-        console.error('Failed to speak:', e);
+        this.clearStartTimeout();
+        console.error('[TTS] speak() threw exception:', e);
         TtsState.lastError = e.message;
-        if (this.currentIndex < this.queue.length - 1) {
-          this.currentIndex++;
-          setTimeout(() => this.speakCurrentChunk(), 200);
-        } else {
-          this.onPlaybackComplete();
-        }
+        this.handleChunkFailed(currentSession, e.message);
+      }
+    },
+
+    validateChunk(chunk) {
+      if (!chunk || typeof chunk !== 'string') {
+        return false;
+      }
+      
+      const trimmed = chunk.trim();
+      if (trimmed.length === 0) {
+        return false;
+      }
+      
+      const nonWhitespace = trimmed.replace(/^[.,!?;:()[\]{}'"]+|[.,!?;:()[\]{}'"]+$/g, '').trim();
+      if (nonWhitespace.length === 0) {
+        return false;
+      }
+      
+      return true;
+    },
+
+    handleStartTimeout(sessionId) {
+      if (!SessionManager.isCurrentSession(sessionId)) {
+        return;
+      }
+      if (this.isCancelled) return;
+      
+      console.warn('[TTS] Start timeout - speech did not start within', this.START_TIMEOUT_MS, 'ms');
+      
+      if (this.didCurrentChunkStart) {
+        return;
+      }
+      
+      this.handleChunkFailed(sessionId, 'Speech failed to start');
+    },
+
+    handleChunkFailed(sessionId, errorMessage) {
+      if (!SessionManager.isCurrentSession(sessionId)) {
+        return;
+      }
+      
+      console.error('[TTS] Chunk failed:', errorMessage);
+      
+      if (this.currentIndex < this.queue.length - 1) {
+        console.log('[TTS] Trying next chunk...');
+        this.currentIndex++;
+        setTimeout(() => {
+          if (SessionManager.isCurrentSession(sessionId) && !this.isCancelled) {
+            this.speakCurrentChunk();
+          }
+        }, 300);
+      } else {
+        console.error('[TTS] All chunks failed');
+        this.handleError(errorMessage);
+      }
+    },
+
+    clearStartTimeout() {
+      if (this.startTimeoutId) {
+        clearTimeout(this.startTimeoutId);
+        this.startTimeoutId = null;
       }
     },
 
@@ -891,6 +1015,8 @@
       this.currentIndex = 0;
       this.currentUtterance = null;
       this.sessionId = null;
+      this.didCurrentChunkStart = false;
+      this.clearStartTimeout();
       TtsState.currentChunkIndex = 0;
       PlaybackState.transition('idle');
       
@@ -940,9 +1066,12 @@
     handleError(message) {
       this.isPlaying = false;
       this.isPaused = false;
+      this.clearStartTimeout();
       PlaybackState.transition('error');
       TtsState.lastError = message;
       this.updateControls();
+      this.updateProgressUI();
+      showToast('Playback error: ' + message, 'error', 4000);
     }
   };
 
@@ -1577,7 +1706,7 @@
       }
     }
     
-    console.log('Voice Assistant Pro initialized - Enhanced TTS');
+    console.log('Voice Assistant Pro initialized - Verified Playback TTS');
   }
 
   if (document.readyState === 'loading') {
