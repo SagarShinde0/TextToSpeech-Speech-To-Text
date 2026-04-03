@@ -1,48 +1,321 @@
 /* ========================================
    Voice Assistant Pro - Production JavaScript
-   Long-Form TTS Version
+   Enhanced TTS with State Machine & Provider Architecture
    ======================================== */
 
 (function() {
   'use strict';
 
   /* ========================================
-     Centralized TTS State Model
+     TTS State Model - Single Source of Truth
      ======================================== */
   const TtsState = {
     text: '',
     chunks: [],
     totalChunks: 0,
     currentChunkIndex: 0,
-    playbackState: 'idle',
     selectedVoiceIndex: 0,
     rate: 1,
+    pitch: 1,
+    volume: 1,
     lastError: null,
     isBrowserSupported: false,
     areVoicesLoaded: false,
-
+    provider: 'browser',
+    
+    playbackState: 'idle',
+    
+    init() {
+      this.reset();
+    },
+    
     reset() {
       this.chunks = [];
       this.totalChunks = 0;
       this.currentChunkIndex = 0;
       this.playbackState = 'idle';
       this.lastError = null;
+    },
+    
+    canPlay() {
+      const hasText = this.text.trim().length > 0;
+      const hasChunks = this.totalChunks > 0;
+      return hasText && hasChunks && this.isBrowserSupported && this.areVoicesLoaded && 
+             (this.playbackState === 'idle' || this.playbackState === 'finished');
     }
   };
 
+  /* ========================================
+     Playback State Machine
+     ======================================== */
+  const PlaybackState = {
+    IDLE: 'idle',
+    PREPARING: 'preparing',
+    READY: 'ready',
+    SPEAKING: 'speaking',
+    PAUSED: 'paused',
+    STOPPING: 'stopping',
+    STOPPED: 'stopped',
+    FINISHED: 'finished',
+    ERROR: 'error',
+    
+    isValidTransition(fromState, toState) {
+      const validTransitions = {
+        [this.IDLE]: [this.PREPARING, this.READY],
+        [this.PREPARING]: [this.READY, this.SPEAKING, this.ERROR, this.IDLE],
+        [this.READY]: [this.SPEAKING, this.IDLE],
+        [this.SPEAKING]: [this.PAUSED, this.STOPPING, this.FINISHED, this.ERROR],
+        [this.PAUSED]: [this.SPEAKING, this.STOPPING, this.IDLE],
+        [this.STOPPING]: [this.STOPPED, this.IDLE],
+        [this.STOPPED]: [this.READY, this.IDLE],
+        [this.FINISHED]: [this.IDLE, this.READY],
+        [this.ERROR]: [this.IDLE]
+      };
+      return validTransitions[fromState]?.includes(toState) || false;
+    },
+    
+    transition(newState) {
+      const oldState = TtsState.playbackState;
+      if (this.isValidTransition(oldState, newState)) {
+        TtsState.playbackState = newState;
+        console.log(`[TTS State] ${oldState} -> ${newState}`);
+        return true;
+      }
+      console.warn(`[TTS State] Invalid transition: ${oldState} -> ${newState}`);
+      return false;
+    }
+  };
+
+  /* ========================================
+     Session Manager - Prevents Stale Callbacks
+     ======================================== */
+  const SessionManager = {
+    currentSessionId: 0,
+    previousSessionId: null,
+    
+    startNewSession() {
+      this.previousSessionId = this.currentSessionId;
+      this.currentSessionId = Date.now() + Math.random();
+      console.log(`[Session] New session started: ${this.currentSessionId}`);
+      return this.currentSessionId;
+    },
+    
+    isCurrentSession(sessionId) {
+      return sessionId === this.currentSessionId;
+    },
+    
+    isStale(sessionId) {
+      return sessionId !== this.currentSessionId && sessionId !== null;
+    }
+  };
+
+  /* ========================================
+     Browser Support Detection
+     ======================================== */
   function checkBrowserSupport() {
     TtsState.isBrowserSupported = 'speechSynthesis' in window;
+    
+    if (!TtsState.isBrowserSupported) {
+      console.warn('[TTS] Browser speech synthesis not supported');
+    } else {
+      console.log('[TTS] Browser speech synthesis available');
+    }
+    
     return TtsState.isBrowserSupported;
   }
 
   /* ========================================
-     Chunking Engine - Robust text splitting
+     Voice Manager - Robust Voice Handling
+     ======================================== */
+  const VoiceManager = {
+    voices: [],
+    loadAttempts: 0,
+    maxAttempts: 10,
+    loadingTimeout: null,
+    
+    init() {
+      this.loadVoices();
+      this.setupVoiceChangedHandler();
+    },
+    
+    setupVoiceChangedHandler() {
+      if (speechSynthesis.onvoiceschanged !== undefined) {
+        speechSynthesis.onvoiceschanged = () => this.loadVoices();
+      }
+    },
+    
+    loadVoices() {
+      let voices = speechSynthesis.getVoices() || [];
+      
+      if (voices.length === 0 && window.speechSynthesis?.getVoices) {
+        voices = window.speechSynthesis.getVoices() || [];
+      }
+      
+      if (voices.length > 0) {
+        this.voices = voices;
+        state.tts.voices = voices;
+        state.tts.isLoaded = true;
+        TtsState.areVoicesLoaded = true;
+        state.tts.retryCount = 0;
+        
+        console.log(`[VoiceManager] Loaded ${voices.length} voices`);
+        
+        this.validateAndSelectVoice();
+        SpeechController.updateControls();
+        return;
+      }
+      
+      if (state.tts.retryCount < state.tts.maxRetries) {
+        state.tts.retryCount++;
+        console.log(`[VoiceManager] Retry loading voices (attempt ${state.tts.retryCount})`);
+        setTimeout(() => this.loadVoices(), 300);
+      } else {
+        console.error('[VoiceManager] Failed to load voices after max retries');
+        TtsState.lastError = 'Voice loading failed';
+        SpeechController.updateControls();
+      }
+    },
+    
+    validateAndSelectVoice() {
+      const savedVoiceIndex = this.getSavedVoiceIndex();
+      const select = elements.voiceSelect;
+      
+      if (select.options.length === 0) {
+        this.populateVoiceList(this.voices);
+      }
+      
+      if (savedVoiceIndex !== null && this.voices[savedVoiceIndex]) {
+        const optionIndex = this.findOptionIndexByVoiceIndex(savedVoiceIndex);
+        if (optionIndex !== null) {
+          select.selectedIndex = optionIndex;
+          TtsState.selectedVoiceIndex = savedVoiceIndex;
+          console.log(`[VoiceManager] Restored saved voice: ${savedVoiceIndex}`);
+          return;
+        }
+      }
+      
+      const bestVoice = this.findBestVoice();
+      if (bestVoice !== null) {
+        const optionIndex = this.findOptionIndexByVoiceIndex(bestVoice.index);
+        if (optionIndex !== null) {
+          select.selectedIndex = optionIndex;
+          TtsState.selectedVoiceIndex = bestVoice.index;
+          console.log(`[VoiceManager] Selected best voice: ${bestVoice.name}`);
+          showToast('Using best available voice', 'info', 2000);
+        }
+      }
+    },
+    
+    getSavedVoiceIndex() {
+      try {
+        const saved = localStorage.getItem('tts_voice');
+        return saved ? parseInt(saved, 10) : null;
+      } catch (e) {
+        return null;
+      }
+    },
+    
+    findBestVoice() {
+      const preferredNames = [
+        'samantha', 'zira', 'google us english', 'microsoft david',
+        'alex', 'daniel', 'mei-jia', 'tessa', 'venessa'
+      ];
+      
+      for (const name of preferredNames) {
+        const found = this.voices.find((v, i) => 
+          v.name.toLowerCase().includes(name)
+        );
+        if (found) {
+          return { index: this.voices.indexOf(found), name: found.name };
+        }
+      }
+      
+      const englishVoices = this.voices.filter(v => 
+        v.lang.startsWith('en')
+      );
+      if (englishVoices.length > 0) {
+        const defaultVoice = englishVoices.find(v => v.default) || englishVoices[0];
+        const index = this.voices.indexOf(defaultVoice);
+        return { index, name: defaultVoice.name };
+      }
+      
+      if (this.voices.length > 0) {
+        return { index: 0, name: this.voices[0].name };
+      }
+      
+      return null;
+    },
+    
+    findOptionIndexByVoiceIndex(voiceIndex) {
+      const select = elements.voiceSelect;
+      for (let i = 0; i < select.options.length; i++) {
+        if (parseInt(select.options[i].value, 10) === voiceIndex) {
+          return i;
+        }
+      }
+      return null;
+    },
+    
+    populateVoiceList(voices) {
+      const select = elements.voiceSelect;
+      select.innerHTML = '';
+      
+      const sortedVoices = [...voices].sort((a, b) => {
+        const aLang = a.lang.split('-')[0];
+        const bLang = b.lang.split('-')[0];
+        if (aLang !== bLang) return aLang.localeCompare(bLang);
+        return a.name.localeCompare(b.name);
+      });
+      
+      sortedVoices.forEach(voice => {
+        const option = document.createElement('option');
+        let label = voice.name;
+        
+        const lowerName = voice.name.toLowerCase();
+        if (lowerName.includes('female') || lowerName.includes('zira') || lowerName.includes('samantha')) {
+          label += ' (F)';
+        } else if (lowerName.includes('male') || lowerName.includes('david') || lowerName.includes('daniel')) {
+          label += ' (M)';
+        }
+        
+        const voiceIndex = voices.indexOf(voice);
+        option.value = voiceIndex;
+        option.textContent = label;
+        
+        select.appendChild(option);
+      });
+      
+      console.log(`[VoiceManager] Populated ${voices.length} voices in dropdown`);
+    },
+    
+    getSelectedVoice() {
+      const voiceIndex = parseInt(elements.voiceSelect.value, 10);
+      const voice = this.voices[voiceIndex];
+      
+      if (voice) {
+        return voice;
+      }
+      
+      if (this.voices.length > 0) {
+        const fallback = this.findBestVoice();
+        if (fallback) {
+          console.warn('[VoiceManager] Selected voice not found, using fallback');
+          return this.voices[fallback.index];
+        }
+      }
+      
+      return null;
+    }
+  };
+
+  /* ========================================
+     Chunking Engine - Enhanced for Natural Speech
      ======================================== */
   const ChunkingEngine = {
     MAX_CHUNK_SIZE: 5000,
-    MIN_CHUNK_SIZE: 500,
-    SAFE_LENGTH: 4900,
-
+    SAFE_LENGTH: 4500,
+    MIN_CHUNK_SIZE: 300,
+    
     chunk(text) {
       if (!text || typeof text !== 'string' || text.length === 0) {
         return [];
@@ -59,7 +332,7 @@
       }
 
       try {
-        const chunks = this.smartSplit(text);
+        const chunks = this.naturalSplit(text);
         return this.validateChunks(chunks, cleanText);
       } catch (e) {
         console.error('Chunking failed:', e);
@@ -79,7 +352,9 @@
     },
 
     validateChunks(chunks, originalText) {
-      const valid = (chunks || []).filter(c => c && typeof c === 'string' && c.trim().length > 0);
+      const valid = (chunks || []).filter(c => 
+        c && typeof c === 'string' && c.trim().length > 0
+      );
       if (valid.length > 0) return valid;
 
       if (originalText && originalText.length > 0) {
@@ -88,22 +363,22 @@
       return [];
     },
 
-    smartSplit(text) {
-      const chunks = [];
-
+    naturalSplit(text) {
       const paragraphs = text.split(/\n\n+/).map(p => p.trim()).filter(p => p && p.length > 0);
+      
+      if (paragraphs.length === 0) {
+        return this.hardSplit(text);
+      }
+
+      const chunks = [];
       
       for (const para of paragraphs) {
         if (para.length <= this.SAFE_LENGTH) {
           chunks.push(para);
         } else {
-          const processed = this.processLargeText(para);
-          chunks.push(...processed);
+          const subChunks = this.splitParagraphNaturally(para);
+          chunks.push(...subChunks);
         }
-      }
-
-      if (chunks.length === 0) {
-        return this.hardSplitByLength(text);
       }
 
       const finalChunks = [];
@@ -113,7 +388,7 @@
           if (trimmed.length <= this.SAFE_LENGTH) {
             finalChunks.push(trimmed);
           } else {
-            finalChunks.push(...this.hardSplitByLength(trimmed));
+            finalChunks.push(...this.hardSplit(trimmed));
           }
         }
       }
@@ -121,14 +396,12 @@
       return finalChunks.filter(c => c);
     },
 
-    processLargeText(text) {
-      if (!text || text.length === 0) return [];
-      if (text.length <= this.SAFE_LENGTH) return [text.trim()];
-      
+    splitParagraphNaturally(para) {
       const result = [];
       let current = '';
       
-      const sentences = this.splitBySentences(text);
+      const sentences = this.splitBySentences(para);
+      
       for (const sentence of sentences) {
         if (!sentence) continue;
         
@@ -146,31 +419,22 @@
         result.push(current.trim());
       }
       
-      if (result.length === 0) {
-        return [text.substring(0, this.SAFE_LENGTH)];
-      }
-      
-      return result;
+      return result.length > 0 ? result : [para.substring(0, this.SAFE_LENGTH)];
     },
 
     splitBySentences(text) {
       if (!text || typeof text !== 'string') return [];
 
-      const matches = text.match(/[^.!?]+[.!?]+(?=\s+[A-Z]|$)|[^.!?]+$/g);
+      const pattern = /[^.!?]+[.!?]+(?=\s+[A-Z]|$)|[^.!?]+$/g;
+      const matches = text.match(pattern);
+      
       if (!matches || matches.length === 0) {
         return [text];
       }
       return matches.map(s => s.trim()).filter(s => s && s.length > 0);
     },
 
-    splitByPunctuation(text) {
-      if (!text) return [];
-      const matches = text.match(/[^.,;:!?()[\]{}]+[.,;:!?()[\]{}]?|\s+/g);
-      if (!matches || matches.length === 0) return [text];
-      return matches.filter(s => s && s.trim());
-    },
-
-    hardSplitByLength(text) {
+    hardSplit(text) {
       if (!text || text.length === 0) return [];
       if (text.length <= this.SAFE_LENGTH) return [text.trim()];
 
@@ -179,9 +443,11 @@
 
       while (remaining && remaining.length > this.SAFE_LENGTH) {
         let splitAt = remaining.lastIndexOf(' ', this.SAFE_LENGTH);
+        
         if (splitAt < this.MIN_CHUNK_SIZE) {
           splitAt = remaining.indexOf(' ', this.SAFE_LENGTH);
         }
+        
         if (splitAt < 0 || splitAt < this.MIN_CHUNK_SIZE) {
           splitAt = this.SAFE_LENGTH;
         }
@@ -200,110 +466,49 @@
       return chunks.filter(c => c && c.length > 0);
     },
 
-    hardSplit(text) {
-      return this.hardSplitByLength(text);
+    estimateDuration(text, rate = 1) {
+      const wordsPerMinute = 150 * rate;
+      const wordCount = text.split(/\s+/).length;
+      return (wordCount / wordsPerMinute) * 60;
     }
   };
 
   /* ========================================
-     Speech Manager - Queue-based playback
+     Speech Controller - Central Playback Control
      ======================================== */
-  const SpeechManager = {
+  const SpeechController = {
     queue: [],
     currentIndex: 0,
     isPlaying: false,
     isPaused: false,
     isCancelled: false,
     currentUtterance: null,
-
+    sessionId: null,
+    
     init() {
       checkBrowserSupport();
+      
       if (!TtsState.isBrowserSupported) {
-        this.showBrowserUnsupported();
+        this.showUnsupportedUI();
         return;
       }
-      this.loadVoices();
+      
+      VoiceManager.init();
       this.bindEvents();
       this.loadPreferences();
-      this.updateTtsControlsState();
+      this.updateControls();
+      this.updateProgressUI();
     },
 
-    showBrowserUnsupported() {
-      elements.ttsStatusBadge.innerHTML = '<span class="status-dot" style="background: var(--accent-danger)"></span><span class="status-text">Unsupported</span>';
+    showUnsupportedUI() {
+      elements.ttsStatusBadge.innerHTML = 
+        '<span class="status-dot" style="background: var(--accent-danger)"></span>' +
+        '<span class="status-text">Unsupported</span>';
       elements.ttsPlay.disabled = true;
       showToast('Browser TTS not supported. Use Chrome or Edge.', 'error');
     },
 
-    loadVoices() {
-      let voices = speechSynthesis.getVoices() || [];
-      
-      if (voices.length === 0) {
-        voices = window.speechSynthesis?.getVoices() || [];
-      }
-      
-      if (voices.length > 0) {
-        state.tts.voices = voices;
-        state.tts.isLoaded = true;
-        state.tts.retryCount = 0;
-        TtsState.areVoicesLoaded = true;
-        this.populateVoiceList(voices);
-        this.updateTtsControlsState();
-        return;
-      }
-      
-      if (state.tts.retryCount < state.tts.maxRetries) {
-        state.tts.retryCount++;
-        setTimeout(() => this.loadVoices(), 300);
-      }
-    },
-
-    populateVoiceList(voices) {
-      const select = elements.voiceSelect;
-      const savedVoice = localStorage.getItem('tts_voice');
-      let selectedIndex = 0;
-      
-      select.innerHTML = '';
-      
-      const sortedVoices = [...voices].sort((a, b) => {
-        const aLang = a.lang.split('-')[0];
-        const bLang = b.lang.split('-')[0];
-        if (aLang !== bLang) return aLang.localeCompare(bLang);
-        return a.name.localeCompare(b.name);
-      });
-      
-      sortedVoices.forEach((voice, index) => {
-        const option = document.createElement('option');
-        let label = voice.name;
-        
-        const lowerName = voice.name.toLowerCase();
-        if (lowerName.includes('female') || lowerName.includes('zira') || lowerName.includes('samantha')) {
-          label += ' (F)';
-        } else if (lowerName.includes('male') || lowerName.includes('david') || lowerName.includes('daniel')) {
-          label += ' (M)';
-        }
-        
-        const voiceIndex = voices.indexOf(voice);
-        option.value = voiceIndex;
-        option.textContent = label;
-        
-        if (savedVoice && parseInt(savedVoice) === voiceIndex) {
-          selectedIndex = index;
-        }
-        
-        select.appendChild(option);
-      });
-      
-      if (select.options.length > 0) {
-        select.selectedIndex = selectedIndex;
-        TtsState.selectedVoiceIndex = selectedIndex;
-      }
-    },
-
     bindEvents() {
-      if (speechSynthesis.onvoiceschanged !== undefined) {
-        speechSynthesis.onvoiceschanged = () => this.loadVoices();
-      }
-
       elements.ttsPlay.addEventListener('click', () => this.play());
       elements.ttsPause.addEventListener('click', () => this.pause());
       elements.ttsResume.addEventListener('click', () => this.resume());
@@ -322,10 +527,11 @@
       });
 
       elements.voiceSelect.addEventListener('change', (e) => {
-        TtsState.selectedVoiceIndex = parseInt(e.target.value) || 0;
+        TtsState.selectedVoiceIndex = parseInt(e.target.value, 10) || 0;
         try {
           localStorage.setItem('tts_voice', e.target.value);
         } catch (e) {}
+        this.updateControls();
       });
 
       elements.ttsText.addEventListener('input', () => {
@@ -334,13 +540,7 @@
       });
 
       elements.ttsClear.addEventListener('click', () => {
-        elements.ttsText.value = '';
-        TtsState.text = '';
-        TtsState.reset();
-        updateCharCount(elements.ttsText, elements.ttsCharCount);
-        this.updateTextInfo();
-        this.updateTtsControlsState();
-        showToast('Text cleared', 'info', 2000);
+        this.clearText();
       });
 
       document.addEventListener('visibilitychange', () => {
@@ -365,7 +565,7 @@
           elements.ttsLanguage.value = savedLang;
         }
       } catch (e) {
-        console.warn('Could not load TTS preferences:', e);
+        console.warn('Could not load preferences:', e);
       }
     },
 
@@ -380,7 +580,7 @@
       elements.ttsChunkCount.textContent = chunks.length + ' chunk' + (chunks.length !== 1 ? 's' : '');
       
       if (text.length > 50000) {
-        elements.ttsWarning.textContent = 'Very large text detected - may take time';
+        elements.ttsWarning.textContent = 'Very large text - may take time';
         elements.ttsWarning.hidden = false;
       } else if (text.length > 30000) {
         elements.ttsWarning.textContent = 'Large text - processing...';
@@ -389,22 +589,22 @@
         elements.ttsWarning.hidden = true;
       }
       
-      this.updateTtsControlsState();
+      this.updateControls();
     },
 
-    updateTtsControlsState() {
-      const text = elements.ttsText.value.trim();
-      const hasText = text.length > 0;
+    updateControls() {
+      const hasText = TtsState.text.trim().length > 0;
       const browserSupported = TtsState.isBrowserSupported;
       const voicesLoaded = TtsState.areVoicesLoaded;
-      const isIdle = TtsState.playbackState === 'idle';
-      const isSpeaking = this.isPlaying;
-      const isPausedState = this.isPaused;
       const hasChunks = TtsState.totalChunks > 0;
       const queueHasItems = this.queue.length > 0;
       
+      const isIdle = TtsState.playbackState === 'idle' || TtsState.playbackState === 'finished';
+      const isSpeaking = TtsState.playbackState === 'speaking';
+      const isPausedState = TtsState.playbackState === 'paused';
+      
       const canPlay = hasText && browserSupported && voicesLoaded && isIdle;
-      const canPause = isSpeaking && !isPausedState;
+      const canPause = isSpeaking;
       const canResume = isPausedState;
       const canStop = isSpeaking || isPausedState;
       const hasPrevChunk = queueHasItems && this.currentIndex > 0;
@@ -432,8 +632,6 @@
         elements.ttsPause.style.display = 'none';
         elements.ttsResume.style.display = 'none';
       }
-
-      this.updateProgressUI();
     },
 
     updateProgressUI() {
@@ -445,7 +643,8 @@
       if (total === 0 && hasText) {
         elements.ttsProgress.textContent = '0 / 0';
         elements.ttsProgressPercent.textContent = '0%';
-        elements.ttsStatusBadge.innerHTML = '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
+        elements.ttsStatusBadge.innerHTML = 
+          '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
       } else if (total > 0) {
         const displayCurrent = this.isPlaying || this.isPaused ? (current + 1) : 0;
         const percent = Math.round((displayCurrent / total) * 100);
@@ -453,32 +652,32 @@
         elements.ttsProgressPercent.textContent = percent + '%';
         
         if (this.isPlaying) {
-          elements.ttsStatusBadge.innerHTML = '<span class="status-dot speaking"></span><span class="status-text">Playing ' + displayCurrent + '/' + total + '</span>';
+          elements.ttsStatusBadge.innerHTML = 
+            '<span class="status-dot speaking"></span>' +
+            '<span class="status-text">Playing ' + displayCurrent + '/' + total + '</span>';
         } else if (this.isPaused) {
-          elements.ttsStatusBadge.innerHTML = '<span class="status-dot ready"></span><span class="status-text">Paused</span>';
+          elements.ttsStatusBadge.innerHTML = 
+            '<span class="status-dot ready"></span><span class="status-text">Paused</span>';
         } else {
-          elements.ttsStatusBadge.innerHTML = '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
+          elements.ttsStatusBadge.innerHTML = 
+            '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
         }
       } else {
         elements.ttsProgress.textContent = '0 / 0';
         elements.ttsProgressPercent.textContent = '0%';
-        elements.ttsStatusBadge.innerHTML = '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
+        elements.ttsStatusBadge.innerHTML = 
+          '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
       }
     },
 
-    validateVoice() {
-      const voiceIndex = elements.voiceSelect.value;
-      const voices = state.tts.voices;
-      if (voiceIndex && voices && voices[voiceIndex]) {
-        return voices[voiceIndex];
-      }
-      if (voices && voices.length > 0) {
-        const defaultVoice = voices.find(v => 
-          v.default || v.name.toLowerCase().includes('samantha') || v.name.toLowerCase().includes('zira')
-        );
-        return defaultVoice || voices[0];
-      }
-      return null;
+    clearText() {
+      this.stop();
+      elements.ttsText.value = '';
+      TtsState.text = '';
+      TtsState.reset();
+      updateCharCount(elements.ttsText, elements.ttsCharCount);
+      this.updateTextInfo();
+      showToast('Text cleared', 'info', 2000);
     },
 
     play() {
@@ -502,7 +701,7 @@
 
       if (!TtsState.areVoicesLoaded || state.tts.voices.length === 0) {
         showToast('Loading voices, please wait...', 'info');
-        this.loadVoices();
+        VoiceManager.loadVoices();
         setTimeout(() => {
           if (TtsState.areVoicesLoaded) {
             this.play();
@@ -513,29 +712,24 @@
         return;
       }
 
-      let chunks;
-      try {
-        chunks = ChunkingEngine.chunk(text);
-      } catch (e) {
-        console.error('Chunking error:', e);
-        chunks = [text.substring(0, 4000)];
-      }
+      const chunks = ChunkingEngine.chunk(text);
       
       if (!chunks || chunks.length === 0) {
         showToast('No valid text to speak', 'error');
         TtsState.lastError = 'No valid chunks';
-        this.updateTtsControlsState();
+        this.updateControls();
         return;
       }
 
-      const voice = this.validateVoice();
+      const voice = VoiceManager.getSelectedVoice();
       if (!voice) {
         showToast('No voice available', 'error');
         TtsState.lastError = 'No voice';
-        this.updateTtsControlsState();
+        this.updateControls();
         return;
       }
 
+      this.sessionId = SessionManager.startNewSession();
       this.queue = chunks;
       this.isCancelled = false;
       this.currentIndex = 0;
@@ -545,31 +739,31 @@
       TtsState.chunks = chunks;
       TtsState.totalChunks = chunks.length;
       TtsState.currentChunkIndex = 0;
-      TtsState.playbackState = 'playing';
+      PlaybackState.transition('speaking');
       
-      updateCharCount(elements.ttsText, elements.ttsCharCount);
-      this.updateTextInfo();
-      this.updateTtsControlsState();
+      this.updateControls();
+      this.updateProgressUI();
       
-      showToast('Preparing ' + chunks.length + ' chunk(s)...', 'info', 2000);
+      showToast('Playing ' + chunks.length + ' chunk(s)...', 'info', 2000);
       
       try {
         this.speakCurrentChunk();
       } catch (e) {
         console.error('Speak error:', e);
         showToast('Error: ' + e.message, 'error');
-        this.isPlaying = false;
-        TtsState.playbackState = 'idle';
-        TtsState.lastError = e.message;
-        this.updateTtsControlsState();
+        this.handleError(e.message);
       }
     },
 
     speakCurrentChunk() {
-      if (this.isCancelled) {
-        TtsState.playbackState = 'idle';
+      const currentSession = this.sessionId;
+      
+      if (this.isCancelled || !SessionManager.isCurrentSession(currentSession)) {
+        console.log('[TTS] Session cancelled or stale, stopping');
+        PlaybackState.transition('idle');
         return;
       }
+      
       if (this.currentIndex >= this.queue.length) {
         this.onPlaybackComplete();
         return;
@@ -584,47 +778,69 @@
 
       const utter = new SpeechSynthesisUtterance(chunk);
       
-      const voice = this.validateVoice();
+      const voice = VoiceManager.getSelectedVoice();
       if (voice) {
         utter.voice = voice;
         utter.lang = voice.lang;
       }
       
       utter.rate = parseFloat(elements.speedControl.value) || TtsState.rate;
-      utter.pitch = 1;
-      utter.volume = 1;
+      utter.pitch = TtsState.pitch;
+      utter.volume = TtsState.volume;
 
       this.currentUtterance = utter;
 
+      const sessionCheck = this.sessionId;
+
       utter.onstart = () => {
+        if (!SessionManager.isCurrentSession(sessionCheck)) {
+          console.log('[TTS] onstart - stale session, ignoring');
+          return;
+        }
         if (this.isCancelled) return;
+        
         this.isPlaying = true;
-        TtsState.playbackState = 'playing';
+        PlaybackState.transition('speaking');
         this.updateProgressUI();
       };
 
       utter.onend = () => {
+        if (!SessionManager.isCurrentSession(sessionCheck)) {
+          console.log('[TTS] onend - stale session, ignoring');
+          return;
+        }
         if (this.isCancelled) return;
         
         if (this.currentIndex < this.queue.length - 1) {
           this.currentIndex++;
-          setTimeout(() => this.speakCurrentChunk(), 100);
+          setTimeout(() => {
+            if (SessionManager.isCurrentSession(sessionCheck) && !this.isCancelled) {
+              this.speakCurrentChunk();
+            }
+          }, 150);
         } else {
           this.onPlaybackComplete();
         }
       };
 
       utter.onerror = (event) => {
-        console.error('TTS Error:', event.error);
-        
+        if (!SessionManager.isCurrentSession(sessionCheck)) {
+          console.log('[TTS] onerror - stale session, ignoring');
+          return;
+        }
         if (this.isCancelled) return;
         if (event.error === 'canceled' || event.error === 'interrupted') return;
         
+        console.error('TTS Error:', event.error);
         TtsState.lastError = event.error;
         
         if (this.currentIndex < this.queue.length - 1) {
           this.currentIndex++;
-          setTimeout(() => this.speakCurrentChunk(), 200);
+          setTimeout(() => {
+            if (SessionManager.isCurrentSession(sessionCheck) && !this.isCancelled) {
+              this.speakCurrentChunk();
+            }
+          }, 200);
         } else {
           this.onPlaybackComplete();
         }
@@ -649,9 +865,9 @@
       
       this.isPaused = true;
       this.isPlaying = false;
-      TtsState.playbackState = 'paused';
+      PlaybackState.transition('paused');
       speechSynthesis.pause();
-      this.updateTtsControlsState();
+      this.updateControls();
       this.updateProgressUI();
       showToast('Paused', 'info', 1500);
     },
@@ -661,9 +877,9 @@
       
       this.isPaused = false;
       this.isPlaying = true;
-      TtsState.playbackState = 'playing';
+      PlaybackState.transition('speaking');
       speechSynthesis.resume();
-      this.updateTtsControlsState();
+      this.updateControls();
       this.updateProgressUI();
       showToast('Resuming...', 'info', 1500);
     },
@@ -674,14 +890,15 @@
       this.isPaused = false;
       this.currentIndex = 0;
       this.currentUtterance = null;
+      this.sessionId = null;
       TtsState.currentChunkIndex = 0;
-      TtsState.playbackState = 'idle';
+      PlaybackState.transition('idle');
       
       if (speechSynthesis.speaking || speechSynthesis.pending) {
         speechSynthesis.cancel();
       }
       
-      this.updateTtsControlsState();
+      this.updateControls();
       this.updateProgressUI();
       showToast('Stopped', 'info', 1500);
     },
@@ -706,7 +923,7 @@
 
     restart() {
       this.stop();
-      this.play();
+      setTimeout(() => this.play(), 100);
     },
 
     onPlaybackComplete() {
@@ -714,10 +931,66 @@
       this.isPaused = false;
       this.currentIndex = 0;
       TtsState.currentChunkIndex = 0;
-      TtsState.playbackState = 'finished';
-      this.updateTtsControlsState();
+      PlaybackState.transition('finished');
+      this.updateControls();
       this.updateProgressUI();
       showToast('Finished speaking', 'success', 2000);
+    },
+
+    handleError(message) {
+      this.isPlaying = false;
+      this.isPaused = false;
+      PlaybackState.transition('error');
+      TtsState.lastError = message;
+      this.updateControls();
+    }
+  };
+
+  /* ========================================
+     Legacy SpeechManager (for compatibility)
+     ======================================== */
+  const SpeechManager = {
+    init() {
+      return SpeechController.init();
+    },
+    loadVoices() {
+      return VoiceManager.loadVoices();
+    },
+    bindEvents() {
+      return SpeechController.bindEvents();
+    },
+    loadPreferences() {
+      return SpeechController.loadPreferences();
+    },
+    updateTextInfo() {
+      return SpeechController.updateTextInfo();
+    },
+    updateTtsControlsState() {
+      return SpeechController.updateControls();
+    },
+    updateProgressUI() {
+      return SpeechController.updateProgressUI();
+    },
+    play() {
+      return SpeechController.play();
+    },
+    pause() {
+      return SpeechController.pause();
+    },
+    resume() {
+      return SpeechController.resume();
+    },
+    stop() {
+      return SpeechController.stop();
+    },
+    skipNext() {
+      return SpeechController.skipNext();
+    },
+    skipPrev() {
+      return SpeechController.skipPrev();
+    },
+    restart() {
+      return SpeechController.restart();
     }
   };
 
@@ -897,7 +1170,9 @@
     },
 
     showUnsupported() {
-      elements.sttStatusBadge.innerHTML = '<span class="status-dot" style="background: var(--accent-danger)"></span><span class="status-text">Unsupported</span>';
+      elements.sttStatusBadge.innerHTML = 
+        '<span class="status-dot" style="background: var(--accent-danger)"></span>' +
+        '<span class="status-text">Unsupported</span>';
       elements.sttStart.disabled = true;
       showToast('Speech recognition not supported. Use Chrome or Edge.', 'error', 6000);
     },
@@ -1029,9 +1304,11 @@
       elements.sttStop.disabled = !isListening;
       
       if (isListening) {
-        elements.sttStatusBadge.innerHTML = '<span class="status-dot listening"></span><span class="status-text">Listening...</span>';
+        elements.sttStatusBadge.innerHTML = 
+          '<span class="status-dot listening"></span><span class="status-text">Listening...</span>';
       } else {
-        elements.sttStatusBadge.innerHTML = '<span class="status-dot idle"></span><span class="status-text">Idle</span>';
+        elements.sttStatusBadge.innerHTML = 
+          '<span class="status-dot idle"></span><span class="status-text">Idle</span>';
       }
     },
 
@@ -1068,14 +1345,18 @@
     checkSupport() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         state.recorder.isSupported = false;
-        elements.recStatusBadge.innerHTML = '<span class="status-dot" style="background: var(--accent-danger)"></span><span class="status-text">Unsupported</span>';
+        elements.recStatusBadge.innerHTML = 
+          '<span class="status-dot" style="background: var(--accent-danger)"></span>' +
+          '<span class="status-text">Unsupported</span>';
         elements.recStart.disabled = true;
         return;
       }
       
       if (!window.MediaRecorder) {
         state.recorder.isSupported = false;
-        elements.recStatusBadge.innerHTML = '<span class="status-dot" style="background: var(--accent-danger)"></span><span class="status-text">Unsupported</span>';
+        elements.recStatusBadge.innerHTML = 
+          '<span class="status-dot" style="background: var(--accent-danger)"></span>' +
+          '<span class="status-text">Unsupported</span>';
         elements.recStart.disabled = true;
         showToast('MediaRecorder is not supported', 'error');
         return;
@@ -1247,9 +1528,11 @@
       elements.recStop.disabled = !isRecording;
       
       if (isRecording) {
-        elements.recStatusBadge.innerHTML = '<span class="status-dot recording"></span><span class="status-text">Recording...</span>';
+        elements.recStatusBadge.innerHTML = 
+          '<span class="status-dot recording"></span><span class="status-text">Recording...</span>';
       } else {
-        elements.recStatusBadge.innerHTML = '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
+        elements.recStatusBadge.innerHTML = 
+          '<span class="status-dot ready"></span><span class="status-text">Ready</span>';
       }
     }
   };
@@ -1258,15 +1541,17 @@
      Initialization
      ======================================== */
   async function init() {
+    TtsState.init();
     checkBrowserSupport();
+    
     SpeechToText.init();
-    SpeechManager.init();
+    SpeechController.init();
     Recorder.init();
     
     updateCharCount(elements.sttText, elements.sttCharCount);
     updateCharCount(elements.ttsText, elements.ttsCharCount);
-    SpeechManager.updateTextInfo();
-    SpeechManager.updateTtsControlsState();
+    SpeechController.updateTextInfo();
+    SpeechController.updateControls();
     
     document.addEventListener('touchstart', function onTouchStart() {
       if (speechSynthesis.state === 'suspended') {
@@ -1292,7 +1577,7 @@
       }
     }
     
-    console.log('Voice Assistant Pro initialized - Long Form TTS');
+    console.log('Voice Assistant Pro initialized - Enhanced TTS');
   }
 
   if (document.readyState === 'loading') {
